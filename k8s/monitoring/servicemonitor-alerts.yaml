@@ -1,0 +1,104 @@
+---
+# ServiceMonitor so Prometheus scrapes the Redemption service
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redemption
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames: [redemption]
+  selector:
+    matchLabels:
+      app: redemption
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+# PrometheusRule: key SLO alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: redemption-slo-alerts
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  groups:
+    - name: redemption.slo
+      interval: 30s
+      rules:
+        # Availability: error rate > 1% for 5 min → page
+        - alert: RedemptionHighErrorRate
+          expr: |
+            sum(rate(http_requests_total{namespace="redemption",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{namespace="redemption"}[5m])) > 0.01
+          for: 5m
+          labels:
+            severity: critical
+            team: sre
+          annotations:
+            summary: "Redemption error rate above 1%"
+            description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+        # Latency: p99 > 2s for 5 min → warn
+        - alert: RedemptionHighP99Latency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{namespace="redemption"}[5m])) by (le)
+            ) > 2
+          for: 5m
+          labels:
+            severity: warning
+            team: sre
+          annotations:
+            summary: "Redemption p99 latency above 2s"
+            description: "p99 latency is {{ $value }}s."
+
+        # Saturation: HPA at max replicas for 5 min → warn
+        - alert: RedemptionHPAMaxedOut
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="redemption",horizontalpodautoscaler="redemption"}
+            >=
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="redemption",horizontalpodautoscaler="redemption"}
+          for: 5m
+          labels:
+            severity: warning
+            team: sre
+          annotations:
+            summary: "Redemption HPA has reached max replicas"
+            description: "The service cannot scale further. Consider raising maxReplicas or provisioning more capacity."
+
+        # PodDisruptionBudget violated
+        - alert: RedemptionPDBViolation
+          expr: |
+            kube_poddisruptionbudget_status_current_healthy{namespace="redemption"}
+            <
+            kube_poddisruptionbudget_status_desired_healthy{namespace="redemption"}
+          for: 2m
+          labels:
+            severity: critical
+            team: sre
+          annotations:
+            summary: "Redemption PDB violated — fewer healthy pods than required"
+
+    - name: redemption.recording
+      rules:
+        # Request rate recording rules for dashboards
+        - record: redemption:request_rate5m
+          expr: sum(rate(http_requests_total{namespace="redemption"}[5m])) by (status)
+        - record: redemption:error_rate5m
+          expr: |
+            sum(rate(http_requests_total{namespace="redemption",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{namespace="redemption"}[5m]))
+        - record: redemption:p99_latency5m
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(http_request_duration_seconds_bucket{namespace="redemption"}[5m])) by (le)
+            )

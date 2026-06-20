@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redemption-pdb
+  namespace: redemption
+spec:
+  # At least 70% of pods must remain available at all times
+  # This allows rolling updates while protecting against AZ-level evictions
+  minAvailable: "70%"
+  selector:
+    matchLabels:
+      app: redemption

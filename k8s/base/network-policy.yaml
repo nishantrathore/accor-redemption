@@ -1,0 +1,91 @@
+# Default-deny all ingress for the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: redemption
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow ALB controller to reach redemption pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-alb
+  namespace: redemption
+spec:
+  podSelector:
+    matchLabels:
+      app: redemption
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aws-load-balancer-controller
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# Allow Prometheus scraping
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: redemption
+spec:
+  podSelector:
+    matchLabels:
+      app: redemption
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+---
+# Allow redemption to reach its dependencies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redemption-egress
+  namespace: redemption
+spec:
+  podSelector:
+    matchLabels:
+      app: redemption
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Aurora PostgreSQL (port comes from Secrets)
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # ElastiCache Redis
+    - ports:
+        - protocol: TCP
+          port: 6379
+    # AWS APIs (HTTPS) — SQS, Secrets Manager, CloudWatch
+    - ports:
+        - protocol: TCP
+          port: 443

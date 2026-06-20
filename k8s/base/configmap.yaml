@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redemption-config
+  namespace: redemption
+data:
+  APP_PORT: "8080"
+  METRICS_PORT: "9090"
+  DB_MAX_CONNECTIONS: "20"
+  DB_CONNECTION_TIMEOUT_MS: "5000"
+  REDIS_POOL_SIZE: "10"
+  CACHE_TTL_SECONDS: "300"
+  REQUEST_TIMEOUT_MS: "30000"
+  ENABLE_CIRCUIT_BREAKER: "true"
+  CIRCUIT_BREAKER_THRESHOLD: "50"
+  CIRCUIT_BREAKER_TIMEOUT_MS: "10000"

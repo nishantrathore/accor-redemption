@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: redemption
+  namespace: redemption
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-southeast-1:ACCOUNT_ID:certificate/CERT_ID"
+    alb.ingress.kubernetes.io/healthcheck-path: /health/ready
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+    # WAF v2 association for OWASP rule set
+    alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:ap-southeast-1:ACCOUNT_ID:regional/webacl/redemption-waf/WAF_ID"
+    # Deregistration delay — allow in-flight requests to complete
+    alb.ingress.kubernetes.io/target-group-attributes: "deregistration_delay.timeout_seconds=60"
+    # Connection idle timeout
+    alb.ingress.kubernetes.io/load-balancer-attributes: "idle_timeout.timeout_seconds=60,access_logs.s3.enabled=true,access_logs.s3.bucket=accor-alb-logs,access_logs.s3.prefix=redemption"
+spec:
+  rules:
+    - host: redemption.api.accor.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: redemption
+                port:
+                  name: http
