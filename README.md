@@ -261,3 +261,7 @@ accor-redemption/
 ## Design Document
 
 See [docs/design-document.md](docs/design-document.md) for the complete architectural decisions, trade-offs, failure scenarios, SLO targets, and team delegation plan (1 Senior + 2 Juniors over 3 sprints).
+
+## Architecture Diagram
+
+A standalone diagram with component summary and network security layers is at [docs/architecture-diagram.md](docs/architecture-diagram.md).
