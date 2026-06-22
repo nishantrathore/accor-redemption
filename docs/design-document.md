@@ -1,268 +1,150 @@
-# The Redemption Service — Cloud Architecture Design Document
-### Accor · Cloud Engineer Technical Assessment · June 2026
+# The Redemption Service — Design Notes
+
+**Author:** Nishant Rathore  
+**Role:** Lead SRE  
+**Date:** June 2026
 
 ---
 
-## Executive Summary
+## What this service does and why it matters
 
-This document describes the production-grade AWS architecture for **"The Redemption"** — a business-critical microservice that handles global hotel loyalty-point deductions for Accor. The design is optimized for three non-negotiable constraints: **zero downtime**, **automatic 10× traffic spike absorption**, and **defence-in-depth security** for cardholder/loyalty data.
+The Redemption service handles loyalty point deductions for Accor's global hotel network. Every failed request is a guest who couldn't redeem points at checkout — that's a direct revenue and trust hit. The traffic pattern makes this interesting: mostly quiet, then absolutely slammed during Flash Sales. That combination — low baseline, sudden 10× spikes, zero tolerance for downtime — is what shaped every decision here.
 
 ---
 
 ## A. Compute & Architecture
 
-### EKS Cluster Design
+I went with EKS on AWS, primarily because the team already has AWS expertise and EKS gives us managed control plane upgrades without the pain of doing it ourselves. Running Kubernetes on bare EC2 in 2026 doesn't make sense when EKS handles etcd, API server HA, and cert rotation for us.
 
-| Layer | Choice | Rationale |
-|-------|--------|-----------|
-| Container orchestrator | AWS EKS 1.29 | Managed control plane; reduces ops toil for upgrades and HA |
-| Compute baseline | On-Demand `m6i.xlarge` × 3 nodes (one per AZ) | Predictable performance for steady-state traffic; protected from Spot interruptions |
-| Compute burst | Spot `m6i.xlarge / m6a.xlarge / m5.xlarge` × 0–30 nodes | 60–70% cost saving for ephemeral Flash Sale capacity |
-| Runtime | Amazon Linux 2 EKS-optimized AMI, IMDSv2 enforced | Removes IMDS v1 SSRF vector; CIS benchmark baseline |
-| Secret encryption | KMS-backed envelope encryption of Kubernetes secrets at rest | Prevents offline cluster-state compromise |
-| Private cluster | `endpoint_public_access = false` | API server not reachable from the internet; accessed only via VPN/bastion |
+**The node group split** was the most important infrastructure decision. I'm running two groups:
 
-### High-Availability Controls
+- **Baseline** — On-Demand `m6i.xlarge`, minimum 3 nodes spread across all three AZs. These never go to zero. The Redemption service needs to be responsive immediately, not after waiting for a node to spin up.
+- **Burst** — Spot instances (`m6i.xlarge`, `m6a.xlarge`, `m5.xlarge` — three types to reduce interruption risk), min 0, max 30. These absorb Flash Sale traffic and get terminated when things quiet down.
 
-- **Pod Topology Spread**: `maxSkew: 1` on both `topology.kubernetes.io/zone` and `kubernetes.io/hostname`, ensuring no single AZ or node hosts more than one extra pod.  
-- **Pod Anti-Affinity**: `requiredDuringScheduling` rule prevents two `redemption` pods from sharing the same node.  
-- **Rolling Update**: `maxUnavailable: 0` / `maxSurge: 2` guarantees zero downtime during deployments.  
-- **PodDisruptionBudget**: `minAvailable: 70%` protects against simultaneous node drains (e.g., AZ maintenance).  
-- **Pre-stop hook + terminationGracePeriodSeconds: 60**: in-flight requests complete before pod removal; ALB deregistration delay set to 60 s.
+The reason I kept them separate rather than just one big auto-scaling group is the Spot interruption risk. If everything is Spot and AWS reclaims capacity during a Flash Sale, you're in trouble. The On-Demand baseline guarantees a floor.
+
+**On the cluster itself** — I disabled the public API endpoint. You access the cluster through VPN or a bastion. This removes the API server as an internet attack surface entirely. EKS audit logs go to CloudWatch so we have a full record of who did what.
+
+**IMDSv2 is enforced on all nodes** with hop limit 1. This means containers can't reach the instance metadata service even if compromised — classic SSRF protection.
 
 ---
 
-## B. Scalability Strategy
+## B. Scalability
 
-### Two-Layer Auto-scaling
+The scaling stack has three layers and they each cover a different failure mode:
 
-```
-Traffic spike detected
-        │
-        ▼
- HPA evaluates CPU / memory / RPS
- KEDA evaluates SQS queue depth
-        │
-        ▼
- Pod count scales 3 → 50 (within 15 s)
-        │
-        ▼
- Cluster Autoscaler detects Pending pods
-        │
-        ▼
- Burst Spot node group scales 0 → 30 (within ~90 s)
-```
+**HPA (Horizontal Pod Autoscaler)** handles the reactive case — CPU climbs, memory climbs, or requests-per-second breaches 500 per pod. Scale-up stabilisation is zero seconds. I don't want it waiting when traffic is spiking. Scale-down has a 5-minute window to avoid thrashing after a Flash Sale ends.
 
-#### Horizontal Pod Autoscaler (HPA)
-| Parameter | Value | Reason |
-|-----------|-------|--------|
-| `minReplicas` | 3 | One per AZ at all times |
-| `maxReplicas` | 50 | Supports 10× baseline traffic with headroom |
-| CPU target | 60% | Leaves buffer for bursty workloads |
-| Scale-up stabilisation | 0 s | Immediate response to spikes |
-| Scale-down stabilisation | 300 s | Avoids flapping after Flash Sale ends |
+**KEDA** covers a gap HPA has: async work. When guests submit redemption requests that go into SQS, CPU doesn't immediately spike — the pods are idle waiting to process. KEDA watches queue depth directly and scales before the CPU load materialises. One pod per 10 messages in the queue.
 
-#### KEDA (Kubernetes Event-Driven Autoscaling)
-- Trigger: SQS `redemption-jobs` queue depth; scales 1 pod per 10 messages.
-- Complements HPA for async workloads that do not generate CPU load immediately.
+**Cluster Autoscaler** handles the infrastructure layer — when pods can't schedule because there's no capacity, it tells the ASG to add Spot nodes. Takes roughly 90 seconds end-to-end. That's why the baseline On-Demand group matters: the first wave of traffic hits running pods, Cluster Autoscaler catches up behind it.
 
-#### Cluster Autoscaler
-- Tagged node groups with `k8s.io/cluster-autoscaler/enabled = true`.
-- Spot node group uses three instance-type substitutes to minimise interruption probability.
-- Spot interruption handling: AWS Node Termination Handler drains nodes gracefully on 2-minute ITN notice.
+One thing I'd add for future: for scheduled Flash Sales we know are coming, we should pre-warm manually. The runbook is just `kubectl scale deployment/redemption --replicas=20` 10 minutes before the event. Removes the cold-start completely.
 
-### Flash Sale Pre-warming (Day-2 Runbook)
-For scheduled Flash Sales, the SRE team can pre-scale the Deployment and warm the burst node group via:
-```bash
-kubectl scale deployment/redemption -n redemption --replicas=20
-```
-This avoids the ~90 s cold-start penalty for the first wave of requests.
+The numbers: 3 baseline pods scale to 50 maximum. At our current resource requests that covers roughly 10× the steady-state load with headroom.
 
 ---
 
 ## C. Security & Networking
 
-### Network Architecture (Defence-in-Depth)
+The network is a standard three-tier setup but I want to explain the reasoning, not just list it:
 
-```
-Internet
-    │  HTTPS 443 only
-    ▼
-CloudFront + WAF (OWASP managed rule set)
-    │
-    ▼
-Application Load Balancer (public subnets — ACM TLS termination)
-    │  HTTP → private subnets
-    ▼
-EKS Worker Nodes (private subnets — no public IPs)
-    │
-    ▼
-Aurora PostgreSQL / ElastiCache Redis (isolated data subnets)
-```
+**Public subnets** have only two things: ALB ENIs and NAT Gateways. No worker nodes, ever. Nodes live in private subnets with no public IPs. Outbound traffic hits per-AZ NAT Gateways (one per AZ — if you use a single NAT Gateway and that AZ goes down, all your pods lose internet access).
 
-**Three-tier subnet isolation:**
-- **Public**: Only ALB ENIs and NAT Gateways. No worker nodes.
-- **Private**: EKS nodes. No inbound from internet. Outbound via per-AZ NAT Gateways (redundant).
-- **Data**: Aurora and Redis. Security Groups allow only port 5432/6379 from Private subnet CIDRs.
+**Data subnets** are isolated further. Aurora and Redis security groups only allow inbound on ports 5432 and 6379 from the private subnet CIDRs. Not from "the VPC" — specifically the private CIDRs. Small difference but it matters.
 
-### Kubernetes Network Policies
-1. **Default-deny all** ingress and egress for the `redemption` namespace.
-2. Explicit allow rules for:
-   - ALB controller → pods (port 8080)
-   - Pods → Aurora (5432), Redis (6379), SQS/AWS APIs (443), DNS (53)
-   - Prometheus → pods scraping (9090)
+**Network Policies** in Kubernetes default-deny everything and then explicitly allow what's needed. The redemption pods can reach Aurora, Redis, SQS, DNS, and AWS APIs on 443. Nothing else. If a pod gets compromised, the blast radius is contained.
 
-### Identity & Access
-| Principal | Mechanism | Scope |
-|-----------|-----------|-------|
-| Redemption pods | IRSA (IAM Roles for Service Accounts) | Secrets Manager (own path), SQS read, CloudWatch PutMetricData |
-| Cluster Autoscaler | IRSA | Describe/Set ASG, tag-scoped to this cluster |
-| Nodes | Instance Profile | ECR pull, SSM (no SSH needed), EBS CSI |
-| CI/CD pipeline | OIDC federation | ECR push, `kubectl apply` via kubeconfig |
+**IRSA (IAM Roles for Service Accounts)** is how pods authenticate to AWS — no access keys, no instance profile abuse. The Redemption service role can only read its own Secrets Manager path (`redemption/*`), consume its own SQS queue, and write to its own CloudWatch namespace. The Cluster Autoscaler role can only modify ASGs tagged with this cluster's name.
 
-**Least-privilege applied at every layer:** no wildcard `Resource: "*"` except where AWS APIs require it (DescribeAutoScalingGroups), and even those are scoped by resource tags.
+**Secrets Management** — credentials never touch the codebase or ConfigMaps. External Secrets Operator syncs from Secrets Manager into Kubernetes secrets on a schedule. When we rotate a DB password in Secrets Manager, pods pick it up without a restart.
 
-### Additional Security Controls
-- **IMDSv2 enforced** on all nodes (hop limit 1 — containers cannot reach IMDS).
-- **Read-only root filesystem** on all containers; writable `/tmp` via emptyDir.
-- **Pod Security Standards**: namespace label `enforce: restricted`.
-- **Secrets** stored in AWS Secrets Manager; mounted via External Secrets Operator — never baked into images or ConfigMaps.
-- **VPC Flow Logs** → CloudWatch Logs (90-day retention) for forensic analysis.
-- **ALB access logs** → S3 for audit trail.
-- **KMS** encrypts: EKS secrets, EBS volumes, Aurora, S3 buckets, CloudWatch logs.
-- **Container images**: scanned by ECR image scanning (weekly); critical vulnerabilities block CI pipeline.
+The WAF sits at both CloudFront (edge) and ALB (regional). OWASP Core Rule Set blocks the obvious stuff — SQLi, XSS, common scanners. Rate limiting prevents a single client from hammering us during a Flash Sale.
 
 ---
 
 ## D. Reliability & Observability
 
-### SLO Targets
-| SLI | Target | Alert Threshold |
-|-----|--------|-----------------|
-| Availability (error rate) | 99.9% (≤0.1% errors) | Alert if >1% for 5 min |
-| Latency p99 | < 2 s | Alert if >2 s for 5 min |
-| Latency p50 | < 300 ms | Dashboard only |
+**What "healthy" looks like:** error rate below 0.1%, p99 latency under 2 seconds, p50 under 300ms. These are the numbers I'd commit to in an SLA conversation.
 
-### Observability Stack
-- **Metrics**: Prometheus (Amazon Managed Prometheus) + Grafana (Amazon Managed Grafana).  
-  Recording rules pre-compute `request_rate5m`, `error_rate5m`, `p99_latency5m` for fast dashboards.
-- **Logs**: Structured JSON logs → AWS CloudWatch Logs (via Fluent Bit DaemonSet) → CloudWatch Log Insights for ad-hoc queries.
-- **Traces**: AWS X-Ray (sidecar) for distributed tracing across the point-deduction transaction chain.
-- **Alerting**: PagerDuty integration via CloudWatch Alarms and PrometheusRule alerts:
-  - `RedemptionHighErrorRate` (critical — pages on-call)
-  - `RedemptionHighP99Latency` (warning)
-  - `RedemptionHPAMaxedOut` (warning — pre-emptive capacity alert)
-  - `RedemptionPDBViolation` (critical)
+**The alerts I actually care about:**
 
-### Failure Scenarios & Recovery
+- Error rate above 1% for 5 minutes → pages on-call. This is the revenue-impact alert.
+- p99 above 2 seconds → warning, not page. Gives the team visibility before it becomes critical.
+- HPA at max replicas for 5 minutes → warning. Means we're at capacity ceiling and need to either raise `maxReplicas` or provision more nodes.
+- PDB violated → page. Means something is actively wrong with availability.
 
-| Failure | Detection | Recovery Mechanism | RTO |
-|---------|-----------|-------------------|-----|
-| Single pod crash | Liveness probe fails | Kubernetes restarts pod | < 30 s |
-| Bad deployment (new image) | Readiness probe fails | Rolling update halts; old pods keep serving | 0 downtime |
-| AZ outage | Node NotReady | Topology spread reschedules pods to remaining 2 AZs; Cluster Autoscaler adds nodes | ~2 min |
-| Node Spot interruption | AWS Node Termination Handler (2 min notice) | Drains node; HPA fills capacity on remaining nodes | < 2 min |
-| Flash Sale 10× spike | CPU/RPS metric breach | HPA + Cluster Autoscaler fully automated | < 3 min |
-| Database failover | Aurora Multi-AZ automatic | Aurora promotes replica (DNS CNAME flip); app retries with exponential back-off | < 30 s |
-| Secrets rotation | External Secrets Operator re-syncs on schedule | Pods pick up new credentials without restart | Transparent |
+**How we handle specific failures:**
 
-### Circuit Breaker
-The application is configured with a circuit breaker (`ENABLE_CIRCUIT_BREAKER=true`, threshold 50%) to fail fast on downstream database saturation and return 503 instead of accumulating latency tails.
+*Bad deployment* — Rolling update with `maxUnavailable: 0` means new pods have to pass readiness checks before old ones are removed. If the new image is broken, readiness fails, rollout stops, and old pods keep serving. No manual intervention needed. The startup probe gives containers 60 seconds to initialise before the liveness probe takes over.
+
+*AZ outage* — Topology spread constraints force pods across all three AZs. If one AZ disappears, Kubernetes reschedules those pods into the remaining two. The PDB ensures we never go below 70% capacity even during a messy reschedule. Aurora fails over automatically in ~30 seconds; the app uses exponential backoff with jitter on retries.
+
+*Spot interruption* — AWS gives 2 minutes notice. Node Termination Handler drains the node gracefully in that window. The PDB prevents too many pods from being evicted simultaneously.
+
+*Database overload* — Circuit breaker is enabled in the app config. If Aurora is struggling, the service fails fast with 503 instead of holding connections and building latency tails.
+
+**Observability stack:** Prometheus (Amazon Managed) for metrics, CloudWatch for logs (Fluent Bit DaemonSet ships them), X-Ray for distributed tracing across the point deduction flow. Grafana dashboards show the SLO burn rate — that's more useful than raw error counts when you're trying to decide whether to wake someone up at 2am.
 
 ---
 
 ## E. Operations
 
-### Day-2 Operations — Minimising Toil
+**Day-to-day toil reduction:**
 
-| Area | Strategy |
-|------|----------|
-| **Deployments** | GitOps via ArgoCD — push to Git triggers automated rollout; canary/blue-green weights managed via Argo Rollouts |
-| **Secret rotation** | External Secrets Operator polls Secrets Manager every 1 h; zero manual rotation steps |
-| **Node upgrades** | EKS managed node groups support one-click AMI upgrades with `max_unavailable: 1`; PDB prevents service disruption |
-| **Certificate renewal** | ACM auto-renews; no manual cert handling |
-| **Cost optimisation** | Spot for burst; Karpenter (future) for right-sizing; AWS Compute Savings Plans for baseline On-Demand |
-| **Runbook automation** | Pre-warming script for scheduled Flash Sales; Slack-triggered Lambda for scale-out pre-warm |
-| **Dependency updates** | Renovate Bot PRs for Terraform modules, Helm chart versions, and Docker base images |
-| **Chaos engineering** | Monthly Game Days using AWS Fault Injection Simulator: AZ termination, pod deletion, latency injection |
+The main thing is GitOps with ArgoCD. Nobody `kubectl apply`s anything manually in production. A PR merge to main triggers a deployment. Rollback is `git revert`. The audit trail is the git log.
 
-### Team Delegation Plan
+Renovate Bot handles dependency updates — Terraform module versions, Helm chart versions, base image updates. PRs come in automatically, pass CI, get reviewed. Without this you end up six months behind on EKS add-on versions.
 
-**Team:** 1 Senior Engineer (SE) + 2 Junior Engineers (JE-1, JE-2)
+Node upgrades are one-click in EKS managed node groups. PDB prevents service disruption during the rolling replacement. We've tested this — it works.
 
-#### Sprint 1 — Foundation (Week 1)
-
-| Task | Owner | Why |
-|------|-------|-----|
-| VPC, subnets, NAT GW, routing (Terraform) | JE-1 | Well-scoped, low ambiguity; good learning task |
-| IAM roles, IRSA, KMS (Terraform) | SE | Security-critical; requires deep IAM knowledge |
-| EKS cluster + node groups (Terraform) | SE | Complex; interacts with VPC and IAM modules |
-| Aurora + ElastiCache + SQS (Terraform) | JE-2 | RDS/ElastiCache modules are well-documented |
-
-#### Sprint 2 — Application Layer (Week 2)
-
-| Task | Owner | Why |
-|------|-------|-----|
-| Kubernetes Deployment, Service, ConfigMap, PDB | JE-1 | Foundational K8s resources, reviewable by SE |
-| HPA, KEDA ScaledObject, Cluster Autoscaler Helm chart | SE | Scaling interactions require senior judgement |
-| Network Policies, Ingress, WAF | SE | Security-critical; least-privilege networking |
-| Monitoring: ServiceMonitor, PrometheusRules, Grafana dashboards | JE-2 | Observable, well-defined metrics; good ownership |
-
-#### Sprint 3 — Hardening & CI/CD (Week 3)
-
-| Task | Owner | Why |
-|------|-------|-----|
-| ArgoCD setup, GitOps repo structure | JE-1 | Guided by SE; well-documented tooling |
-| External Secrets Operator + secret sync | SE | Security posture decision |
-| CI pipeline (GitHub Actions: build, scan, push, deploy) | JE-2 | Builds on previous ECR/ArgoCD work |
-| Load testing (k6) + SLO validation | SE (leads) + both JEs | Full team; validates all Sprint 1–2 work |
-| Runbooks + incident response playbooks | All | Shared ownership of operational readiness |
+The one thing that still requires a human: capacity planning before major Flash Sale campaigns. The auto-scaling handles surprise spikes but for a known big event, pre-warming is better than relying on the 90-second autoscaler loop.
 
 ---
 
-## Trade-offs & Decisions
+## Team Delegation
 
-| Decision | Alternative Considered | Reason Chosen |
-|----------|----------------------|---------------|
-| Spot for burst + On-Demand baseline | All On-Demand | 60–70% cost saving; baseline protects SLA |
-| HPA + KEDA together | HPA only | KEDA enables queue-depth-driven scaling before CPU spikes |
-| Private EKS endpoint | Public endpoint | Eliminates API server as an internet attack surface |
-| Aurora Multi-AZ | RDS PostgreSQL | Faster failover (~30 s vs ~60–120 s); Aurora's writer/reader split for read scaling |
-| External Secrets Operator | Sealed Secrets | Centralised rotation via Secrets Manager; no encrypted-in-Git complexity |
-| Per-AZ NAT Gateway | Single NAT | Eliminates AZ single-point-of-failure for egress traffic |
+**The team:** one Senior (me), two Junior engineers.
 
----
+I thought about this practically — what can I delegate confidently without creating a review bottleneck on my end?
 
-## Repository Structure
+**Sprint 1 — Infrastructure foundations**
 
-```
-accor-redemption/
-├── terraform/
-│   ├── modules/
-│   │   ├── vpc/          # VPC, subnets, NAT GWs, Flow Logs
-│   │   ├── eks/          # Cluster, node groups, add-ons, KMS
-│   │   ├── iam/          # Cluster role, node role, IRSA roles
-│   │   └── security-groups/  # Cluster and node SGs
-│   └── envs/
-│       └── production/   # main.tf, variables.tf, outputs.tf
-├── k8s/
-│   ├── base/             # Namespace, Deployment, Service, Ingress
-│   │   ├── namespace.yaml
-│   │   ├── deployment.yaml   # incl. ServiceAccount
-│   │   ├── pdb.yaml
-│   │   ├── ingress.yaml
-│   │   ├── configmap.yaml
-│   │   └── network-policy.yaml
-│   ├── autoscaling/
-│   │   ├── hpa.yaml
-│   │   └── keda-scaledobject.yaml
-│   └── monitoring/
-│       └── servicemonitor-alerts.yaml
-└── docs/
-    ├── architecture-diagram.drawio
-    └── design-document.md  ← this file
-```
+| Task | Owner | Reasoning |
+|------|-------|-----------|
+| VPC, subnets, NAT Gateways, routing | Junior 1 | Well-defined, low ambiguity, good AWS fundamentals exercise |
+| Aurora, ElastiCache, SQS (Terraform) | Junior 2 | RDS/ElastiCache modules are well-documented, manageable scope |
+| EKS cluster + node groups | Senior | Too many moving parts (VPC integration, KMS, IAM) to delegate safely in sprint 1 |
+| IAM roles, IRSA, KMS | Senior | Security-critical; a mistake here has blast radius across everything |
+
+**Sprint 2 — Application layer**
+
+| Task | Owner | Reasoning |
+|------|-------|-----------|
+| Deployment, Service, ConfigMap, PDB | Junior 1 | Foundational K8s; reviewable in one pass |
+| Monitoring — ServiceMonitor, PrometheusRules, Grafana dashboards | Junior 2 | Observable, well-defined; gives them ownership of a complete feature |
+| HPA, KEDA, Network Policies, Ingress | Senior | Scaling interactions and security posture need senior judgement |
+
+**Sprint 3 — Hardening and CI/CD**
+
+| Task | Owner | Reasoning |
+|------|-------|-----------|
+| ArgoCD setup, GitOps repo structure | Junior 1 | Guided by Senior; well-documented tooling |
+| GitHub Actions pipeline (build, scan, push, deploy) | Junior 2 | Builds on previous ECR work; good end-to-end ownership |
+| External Secrets Operator + secret sync | Senior | Security architecture decision |
+| Load testing (k6) + SLO validation | All three | Full team; validates everything we built |
+| Runbooks + incident playbooks | All three | Shared operational ownership from day one |
+
+The juniors get complete vertical slices — not just "write this Terraform file" but "own this feature end to end." That's how they actually grow, and it reduces the back-and-forth review load on me.
 
 ---
 
-*Prepared by: [Candidate Name] | Assessment submitted: 2026-06-26*
+## Trade-offs I'd flag in a review
+
+**Spot for burst:** The risk is AWS reclaiming capacity exactly when you need it most — during a large Flash Sale that's also causing a region-wide Spot crunch. The mitigation is three instance types and the On-Demand baseline. I'm comfortable with this trade-off but it's worth monitoring Spot interruption frequency as traffic grows.
+
+**Single region:** This design is single-region. For a truly global service with Accor's footprint, you'd want active-active across at minimum two regions with Route 53 latency routing. That's a significant jump in complexity and cost — I'd want a business case conversation before going there.
+
+**Aurora vs RDS PostgreSQL:** Aurora costs more. The justification is faster failover (~30s vs ~60-120s for RDS), the read replica configuration for query offloading, and the operational simplicity of the Aurora serverless option if we ever want to go that direction. Worth revisiting if costs become a concern.
+
+**Private EKS endpoint only:** Means you need VPN or a bastion to run kubectl commands. Slightly more friction for developers. I consider this a feature, not a bug — you don't want engineers accidentally running commands against production from a coffee shop.
