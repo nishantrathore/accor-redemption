@@ -1,9 +1,5 @@
 # The Redemption Service — Design Document
 
-**Author:** Nishant Kumar
-
----
-
 ## What this service does and why it matters
 
 The Redemption service handles loyalty point deductions for Accor's global hotel network. Every failed request is a guest who couldn't redeem points at checkout — that's a direct revenue and trust hit. The traffic pattern makes this interesting: mostly quiet, then absolutely slammed during Flash Sales. That combination — low baseline, sudden 10× spikes, zero tolerance for downtime — is what shaped every decision here.
