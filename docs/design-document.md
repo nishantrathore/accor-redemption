@@ -98,30 +98,3 @@ Node upgrades are one-click with EKS managed node groups. PDB prevents service d
 
 The one thing that still needs a human: capacity planning before known large Flash Sale campaigns. Auto-scaling handles surprise spikes fine but for a known event, pre-warming 10 minutes early is just better.
 
-**Task delegation across the team (1 Senior, 2 Juniors):**
-
-*Sprint 1 — Infrastructure*
-
-| Task | Owner |
-|------|-------|
-| VPC, subnets, NAT Gateways, routing | Junior 1 |
-| Aurora, ElastiCache, SQS | Junior 2 |
-| EKS cluster + node groups | Senior |
-| IAM roles, IRSA, KMS | Senior |
-
-*Sprint 2 — Application layer*
-
-| Task | Owner |
-|------|-------|
-| Deployment, Service, ConfigMap, PDB | Junior 1 |
-| Monitoring — Prometheus rules, Grafana dashboards | Junior 2 |
-| HPA, KEDA, Network Policies, Ingress | Senior |
-
-*Sprint 3 — Hardening and CI/CD*
-
-| Task | Owner |
-|------|-------|
-| ArgoCD setup, GitOps structure | Junior 1 |
-| GitHub Actions pipeline | Junior 2 |
-| External Secrets Operator | Senior |
-| Load testing + SLO validation | All |
