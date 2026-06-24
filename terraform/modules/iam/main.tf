@@ -3,7 +3,6 @@ variable "environment"         { type = string }
 variable "aws_region"          { type = string }
 variable "account_id"          { type = string }
 
-# ── EKS Cluster Role ──────────────────────────────────────────────────────────
 resource "aws_iam_role" "cluster" {
   name = "${var.cluster_name}-cluster-role"
   assume_role_policy = jsonencode({
@@ -21,7 +20,6 @@ resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
-# ── EKS Node Role ─────────────────────────────────────────────────────────────
 resource "aws_iam_role" "node" {
   name = "${var.cluster_name}-node-role"
   assume_role_policy = jsonencode({
@@ -54,7 +52,6 @@ resource "aws_iam_role_policy_attachment" "node_ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-# ── IRSA: Cluster Autoscaler ──────────────────────────────────────────────────
 data "aws_iam_openid_connect_provider" "cluster" {
   url = "https://oidc.eks.${var.aws_region}.amazonaws.com/id/PLACEHOLDER"
 }
@@ -97,7 +94,7 @@ resource "aws_iam_role_policy" "cluster_autoscaler" {
           "ec2:DescribeInstanceTypes",
           "ec2:DescribeLaunchTemplateVersions",
           "ec2:GetInstanceTypesFromInstanceRequirements",
-          "eks:DescribeNodegroup"
+          "eks:DescribeNodegroup",
         ]
         Resource = "*"
       },
@@ -105,18 +102,17 @@ resource "aws_iam_role_policy" "cluster_autoscaler" {
         Effect = "Allow"
         Action = [
           "autoscaling:SetDesiredCapacity",
-          "autoscaling:TerminateInstanceInAutoScalingGroup"
+          "autoscaling:TerminateInstanceInAutoScalingGroup",
         ]
         Resource = "*"
         Condition = {
           StringEquals = { "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned" }
         }
-      }
+      },
     ]
   })
 }
 
-# ── IRSA: Redemption Service ──────────────────────────────────────────────────
 resource "aws_iam_role" "redemption_service" {
   name = "${var.cluster_name}-redemption-svc"
   assume_role_policy = jsonencode({
@@ -144,29 +140,26 @@ resource "aws_iam_role_policy" "redemption_service" {
     Version = "2012-10-17"
     Statement = [
       {
-        # Secrets Manager: read only the service's own secrets
-        Effect = "Allow"
-        Action = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
         Resource = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:redemption/*"
       },
       {
-        # CloudWatch: emit custom metrics
         Effect   = "Allow"
         Action   = ["cloudwatch:PutMetricData"]
         Resource = "*"
         Condition = { StringEquals = { "cloudwatch:namespace" = "Accor/Redemption" } }
       },
       {
-        # SQS: read from the redemption jobs queue
-        Effect = "Allow"
-        Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
         Resource = "arn:aws:sqs:${var.aws_region}:${var.account_id}:redemption-jobs*"
-      }
+      },
     ]
   })
 }
 
-output "cluster_role_arn"      { value = aws_iam_role.cluster.arn }
-output "node_role_arn"         { value = aws_iam_role.node.arn }
-output "redemption_role_arn"   { value = aws_iam_role.redemption_service.arn }
-output "autoscaler_role_arn"   { value = aws_iam_role.cluster_autoscaler.arn }
+output "cluster_role_arn"    { value = aws_iam_role.cluster.arn }
+output "node_role_arn"       { value = aws_iam_role.node.arn }
+output "redemption_role_arn" { value = aws_iam_role.redemption_service.arn }
+output "autoscaler_role_arn" { value = aws_iam_role.cluster_autoscaler.arn }

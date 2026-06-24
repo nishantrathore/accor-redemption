@@ -2,7 +2,6 @@ variable "cluster_name" { type = string }
 variable "vpc_id"        { type = string }
 variable "environment"   { type = string }
 
-# ── Cluster SG (control plane ↔ nodes) ───────────────────────────────────────
 resource "aws_security_group" "cluster" {
   name        = "${var.cluster_name}-cluster-sg"
   description = "EKS cluster control-plane security group"
@@ -20,7 +19,6 @@ resource "aws_security_group_rule" "cluster_egress_all" {
   description       = "Allow all outbound"
 }
 
-# ── Nodes SG ─────────────────────────────────────────────────────────────────
 resource "aws_security_group" "nodes" {
   name        = "${var.cluster_name}-nodes-sg"
   description = "EKS worker nodes security group"

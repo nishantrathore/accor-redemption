@@ -1,6 +1,6 @@
 # Architecture Diagram — The Redemption Service
 
-> AWS EKS Production Architecture · ap-southeast-1 (Singapore)
+AWS EKS production architecture, ap-southeast-1 (Singapore)
 
 ---
 

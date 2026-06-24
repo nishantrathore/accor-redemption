@@ -28,7 +28,6 @@ variable "burst_node_config" {
   })
 }
 
-# ── EKS Cluster ───────────────────────────────────────────────────────────────
 resource "aws_eks_cluster" "this" {
   name     = var.cluster_name
   role_arn = var.cluster_role_arn
@@ -38,7 +37,7 @@ resource "aws_eks_cluster" "this" {
     subnet_ids              = var.private_subnet_ids
     security_group_ids      = [var.cluster_sg_id]
     endpoint_private_access = true
-    endpoint_public_access  = false  # access via VPN/bastion only
+    endpoint_public_access  = false
   }
 
   enabled_cluster_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
@@ -53,14 +52,12 @@ resource "aws_eks_cluster" "this" {
   tags = { Name = var.cluster_name }
 }
 
-# KMS key for secrets-at-rest encryption
 resource "aws_kms_key" "eks" {
-  description             = "EKS secrets encryption key for ${var.cluster_name}"
+  description             = "EKS secrets encryption - ${var.cluster_name}"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 }
 
-# ── Baseline Node Group (On-Demand, always present) ───────────────────────────
 resource "aws_eks_node_group" "baseline" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${var.cluster_name}-baseline"
@@ -83,9 +80,9 @@ resource "aws_eks_node_group" "baseline" {
   }
 
   tags = {
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-    "k8s.io/cluster-autoscaler/enabled"             = "true"
-    "k8s.io/cluster-autoscaler/node-template/label/workload-type" = "baseline"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}"                  = "owned"
+    "k8s.io/cluster-autoscaler/enabled"                              = "true"
+    "k8s.io/cluster-autoscaler/node-template/label/workload-type"    = "baseline"
   }
 }
 
@@ -106,18 +103,18 @@ resource "aws_launch_template" "baseline" {
 
   metadata_options {
     http_endpoint               = "enabled"
-    http_tokens                 = "required"  # IMDSv2 enforced
+    http_tokens                 = "required"
     http_put_response_hop_limit = 1
   }
 
   vpc_security_group_ids = concat([var.cluster_sg_id], var.additional_sg_ids)
+
   tag_specifications {
     resource_type = "instance"
     tags          = { Name = "${var.cluster_name}-baseline-node" }
   }
 }
 
-# ── Burst Node Group (Spot, scales to zero) ───────────────────────────────────
 resource "aws_eks_node_group" "burst" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${var.cluster_name}-burst"
@@ -146,9 +143,9 @@ resource "aws_eks_node_group" "burst" {
   }
 
   tags = {
-    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
-    "k8s.io/cluster-autoscaler/enabled"             = "true"
-    "k8s.io/cluster-autoscaler/node-template/taint/workload-type" = "burst:NoSchedule"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}"                        = "owned"
+    "k8s.io/cluster-autoscaler/enabled"                                    = "true"
+    "k8s.io/cluster-autoscaler/node-template/taint/workload-type"          = "burst:NoSchedule"
   }
 }
 
@@ -173,6 +170,7 @@ resource "aws_launch_template" "burst" {
   }
 
   vpc_security_group_ids = concat([var.cluster_sg_id], var.additional_sg_ids)
+
   tag_specifications {
     resource_type = "instance"
     tags          = { Name = "${var.cluster_name}-burst-node" }
@@ -189,29 +187,28 @@ data "aws_ami" "eks_node" {
   }
 }
 
-# ── EKS Add-ons ──────────────────────────────────────────────────────────────
 resource "aws_eks_addon" "vpc_cni" {
-  cluster_name             = aws_eks_cluster.this.name
-  addon_name               = "vpc-cni"
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "vpc-cni"
   resolve_conflicts_on_update = "OVERWRITE"
 }
 
 resource "aws_eks_addon" "coredns" {
-  cluster_name             = aws_eks_cluster.this.name
-  addon_name               = "coredns"
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "coredns"
   resolve_conflicts_on_update = "OVERWRITE"
-  depends_on               = [aws_eks_node_group.baseline]
+  depends_on                  = [aws_eks_node_group.baseline]
 }
 
 resource "aws_eks_addon" "kube_proxy" {
-  cluster_name             = aws_eks_cluster.this.name
-  addon_name               = "kube-proxy"
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "kube-proxy"
   resolve_conflicts_on_update = "OVERWRITE"
 }
 
 resource "aws_eks_addon" "aws_ebs_csi_driver" {
-  cluster_name             = aws_eks_cluster.this.name
-  addon_name               = "aws-ebs-csi-driver"
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "aws-ebs-csi-driver"
   resolve_conflicts_on_update = "OVERWRITE"
 }
 

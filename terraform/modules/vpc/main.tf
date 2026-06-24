@@ -4,7 +4,6 @@ variable "availability_zones" { type = list(string) }
 variable "environment" { type = string }
 
 locals {
-  # Carve /19 subnets — 8192 IPs each — from the /16
   private_cidrs = [for i, az in var.availability_zones : cidrsubnet(var.cidr, 3, i)]
   public_cidrs  = [for i, az in var.availability_zones : cidrsubnet(var.cidr, 3, i + length(var.availability_zones))]
 }
@@ -96,7 +95,6 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-# VPC Flow Logs → CloudWatch
 resource "aws_cloudwatch_log_group" "flow_logs" {
   name              = "/aws/vpc/${var.name}/flow-logs"
   retention_in_days = 90
@@ -120,9 +118,13 @@ resource "aws_iam_role_policy" "flow_logs" {
     Version = "2012-10-17"
     Statement = [{
       Effect = "Allow"
-      Action = ["logs:CreateLogGroup", "logs:CreateLogStream",
-        "logs:PutLogEvents", "logs:DescribeLogGroups",
-      "logs:DescribeLogStreams"]
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+      ]
       Resource = "*"
     }]
   })

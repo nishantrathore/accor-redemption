@@ -38,7 +38,6 @@ provider "aws" {
   }
 }
 
-# ── VPC ──────────────────────────────────────────────────────────────────────
 module "vpc" {
   source = "../../modules/vpc"
 
@@ -48,7 +47,6 @@ module "vpc" {
   environment        = var.environment
 }
 
-# ── IAM ──────────────────────────────────────────────────────────────────────
 module "iam" {
   source = "../../modules/iam"
 
@@ -58,7 +56,6 @@ module "iam" {
   account_id   = data.aws_caller_identity.current.account_id
 }
 
-# ── Security Groups ──────────────────────────────────────────────────────────
 module "security_groups" {
   source = "../../modules/security-groups"
 
@@ -67,7 +64,6 @@ module "security_groups" {
   environment = var.environment
 }
 
-# ── EKS ──────────────────────────────────────────────────────────────────────
 module "eks" {
   source = "../../modules/eks"
 
